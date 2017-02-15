@@ -55,7 +55,7 @@ class SSHConfig (object):
 
         :param file_obj: a file-like object to read the config file from
         """
-        host = {"host": ['*'], "config": {}}
+        conf = {"host": ['*'], "config": {}, "match": []}
         for line in file_obj:
             # Strip any leading or trailing whitespace from the line.
             # See https://github.com/paramiko/paramiko/issues/499 for more info.
@@ -68,18 +68,29 @@ class SSHConfig (object):
                 raise Exception("Unparsable line %s" % line)
             key = match.group(1).lower()
             value = match.group(2)
-            
+
             if key == 'host':
-                self._config.append(host)
-                host = {
+                self._config.append(conf)
+                conf = {
                     'host': self._get_hosts(value),
+                    'match': [],
                     'config': {}
                 }
+
+            elif key == 'match':
+                self._config.append(conf)
+
+                conf = {
+                    'host': None,
+                    'match': self._get_matches(value),
+                    'config': {}
+                }
+
             elif key == 'proxycommand' and value.lower() == 'none':
                 # Store 'none' as None; prior to 3.x, it will get stripped out
                 # at the end (for compatibility with issue #415). After 3.x, it
                 # will simply not get stripped, leaving a nice explicit marker.
-                host['config'][key] = None
+                conf['config'][key] = None
             else:
                 if value.startswith('"') and value.endswith('"'):
                     value = value[1:-1]
@@ -88,13 +99,13 @@ class SSHConfig (object):
                 # cases, since they are allowed to be specified multiple times
                 # and they should be tried in order of specification.
                 if key in ['identityfile', 'localforward', 'remoteforward']:
-                    if key in host['config']:
-                        host['config'][key].append(value)
+                    if key in conf['config']:
+                        conf['config'][key].append(value)
                     else:
-                        host['config'][key] = [value]
-                elif key not in host['config']:
-                    host['config'][key] = value
-        self._config.append(host)
+                        conf['config'][key] = [value]
+                elif key not in conf['config']:
+                    conf['config'][key] = value
+        self._config.append(conf)
 
     def lookup(self, hostname):
         """
@@ -239,6 +250,32 @@ class SSHConfig (object):
             return shlex.split(host)
         except ValueError:
             raise Exception("Unparsable host %s" % host)
+
+    def _get_matches(self, match):
+        """
+        Return specified matches and their parameters
+        """
+        matches = []
+        tokens = shlex.split(match)
+        while tokens:
+            match = {
+                'type': None,
+                'param': None,
+                'negate': False
+            }
+            match_type = tokens.pop(0)
+            if match_type.startswith('!'):
+                match['negate'] = True
+                match_type = match_type[1:]
+            match['type'] = match_type
+            if match_type in ['all', 'canonical']:  # The only match types with no parameter
+                matches.append(match)
+                continue
+            if not tokens:
+                raise Exception("Missing parameter to Match type '%s'" % match_type)
+            match['param'] = tokens.pop(0)
+            matches.append(match)
+        return matches
 
 
 class LazyFqdn(object):
