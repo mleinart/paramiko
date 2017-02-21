@@ -127,22 +127,8 @@ class SSHConfig (object):
 
         :param str hostname: the hostname to lookup
         """
-        matches = [
-            config for config in self._config
-            if self._allowed(config['host'], hostname)
-        ]
+        ret = self._process_config(hostname)
 
-        ret = {}
-        for match in matches:
-            for key, value in match['config'].items():
-                if key not in ret:
-                    # Create a copy of the original value,
-                    # else it will reference the original list
-                    # in self._config and update that value too
-                    # when the extend() is being called.
-                    ret[key] = value[:] if value is not None else value
-                elif key == 'identityfile':
-                    ret[key].extend(value)
         ret = self._expand_variables(ret, hostname)
         # TODO: remove in 3.x re #670
         if 'proxycommand' in ret and ret['proxycommand'] is None:
@@ -167,6 +153,33 @@ class SSHConfig (object):
             elif fnmatch.fnmatch(hostname, host):
                 match = True
         return match
+
+    def _execute(self, config, hostname, command):
+        #XXX any way to use _expand_variables here?
+        replacements = [
+            ('%h', config['hostname'].replace('%h', hostname),
+            ('%l', LazyFqdn(hostname),
+            ('%L', socket.gethostname().split('.')[0]),
+            ('%n', hostname),
+            ('%p', port),
+            ('%r', remoteuser),
+            ('%u', user),
+            ('%d', os.path.getcwd())
+        ]
+
+        for find, replace in replacements:
+            command = command.replace(find, replace)
+
+        from subprocess import CalledProcessError, check_call, STDOUT
+        cmd = shlex.split(command)
+
+        try:
+            with open('/dev/null', 'r+') as devnull:
+                check_call(cmd, shell=True, stdin=devnull, stdout=devnull, stderr=STDOUT)
+        except CalledProcessError as e:
+            # XXX: Log debug?
+            return False
+        return True
 
     def _expand_variables(self, config, hostname):
         """
@@ -276,6 +289,66 @@ class SSHConfig (object):
             match['param'] = tokens.pop(0)
             matches.append(match)
         return matches
+
+    def _process_config(self, hostname, canonical_host=None):
+        def _merge_config(config, ret):
+            for key, value in config.items():
+                if key not in ret:
+                    # Create a copy of the original value,
+                    # else it will reference the original list
+                    # in self._config and update that value too
+                    # when the extend() is being called.
+                    ret[key] = value[:] if value is not None else value
+                elif key == 'identityfile':
+                    if value not in ret[key]:
+                        ret[key].extend(value)
+
+        ret = {}
+
+        for config in self._config:
+            if config['host'] and self._allowed(config['host'], hostname):
+                _merge_config(config, ret)
+            elif config['match'] and self._match(ret, config['match'], hostname, canonical_host):
+                _merge_config(config, ret)
+
+    def _match(self, config, match, hostname, canonical_host=None):
+        ret_true = not match['negate']
+        ret_false = not ret_true
+
+        if match['type'] == 'all':
+            return ret_true
+        elif match['type'] == 'canonical':
+            if canonical_host:
+                return ret_true
+            return ret_false
+        elif match['type'] == 'host':
+            if self._allowed(match['param'].split(','), canonical_host or hostname):
+                return ret_true
+            return ret_false
+        elif match['type'] == 'originalhost':
+            if self._allowed(match['param'].split(','), hostname):
+                return ret_true
+            return ret_false
+        elif match['type'] == 'user':
+            user = os.getenv('USER')
+            if 'user' in config:
+                remoteuser = config['user']
+            else:
+                remoteuser = user
+            if match['param'] == remoteuser:
+                return ret_true
+            return ret_false
+        elif match['type'] == 'localuser':
+            if os.getenv('USER') == match['param']:
+                return ret_true
+            return ret_false
+        elif match['exec']:
+            if self._execute(config, hostname, command):
+                return ret_true
+            return ret_false
+
+        #XXX: unsupported match type - raise?
+        return False
 
 
 class LazyFqdn(object):
